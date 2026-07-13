@@ -6,3 +6,4 @@ data/
 *.csv
 *__pycache__/
 *.python-version
+docs/ANALYSIS_FRAMEWORK.md
