@@ -22,7 +22,7 @@ Carry out preliminary analysis to understand whether this is a worthwhile projec
 ## Approach
 We want to replicate the working memory signatures from Stroud et al. (2023) to understand whether representations of objects and/or positions show the same signature of distinct encoding in early compared to mid/late delay periods. 
 
-To do so, we will take trials in which only one object is shown to the animal. On these trials, we will either marginalise over the position or the object identity. We will then try to decode, respectively, the object identity or the position using linear discriminant analysis. The decoder will be trained on 100ms bins from the stimulus presentation (1000ms) until the end of the delay period (1000ms). Each decoder will be trained on 90% of trials and will be used to decode identity or position from held-out data (10%) from all time points with 10-fold cross-validation. 
+To do so, we will take trials in which only one object is shown to the animal. On these trials, we will either marginalise over the position or the object identity. We will then try to decode, respectively, the object identity or the position using linear discriminant analysis. The decoder will be trained on 100ms bins from the stimulus presentation (1000ms) until the end of the delay period (1000ms). Each decoder will be trained on 75% of trials and will be used to decode identity or position from held-out data (25%) from all time points with 4-fold cross-validation. 
 
 In addition to doing this decoding analysis, we will also do representational similarity analysis (using cosine similarity) with the same binning and train/test strategy as for the decoding analysis.
 
