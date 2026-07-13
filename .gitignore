@@ -2,3 +2,7 @@
 *.nwb
 *.pdf
 data/
+*CLAUDE.md
+*.csv
+*__pycache__/
+*.python-version
