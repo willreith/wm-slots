@@ -1,28 +1,75 @@
-"""Extract single-object trials and spikes from the Watters WM dataset (Perle session)."""
+"""Extract single-object trials and spikes from the Watters WM dataset."""
 import ast
+import json
 import re
+import urllib.request
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pynwb
 import pynapple as nap
+import lindi
 
 _ROOT = Path(__file__).resolve().parents[1]
 SESSION = "2022-05-28"
+SUBJECT = "Perle"
+_DANDISET, _VERSION = "000620", "0.260127.2208"
+_local_cache = lindi.LocalCache()
+_ASSETS = None
 
 
-def _behav(session=SESSION):
-    return _ROOT / f"data/Perle/behav/sub-Perle_ses-{session}_behavior+task.nwb"
+def _behav(session=SESSION, subject=SUBJECT):
+    return _ROOT / f"data/{subject}/behav/sub-{subject}_ses-{session}_behavior+task.nwb"
 
 
-def _spikes(session=SESSION):
-    return _ROOT / f"data/Perle/ephys/spikes/sub-Perle_ses-{session}_spikesorting.nwb"
+def _spikes(session=SESSION, subject=SUBJECT):
+    return _ROOT / f"data/{subject}/ephys/spikes/sub-{subject}_ses-{session}_spikesorting.nwb"
 
 
-def load_single_object_trials(session=SESSION):
+def _asset_index():
+    """{(subject, session): {'behav': asset_id, 'spikes': asset_id}} from the DANDI API (cached)."""
+    global _ASSETS
+    if _ASSETS is None:
+        url = (f"https://api.dandiarchive.org/api/dandisets/{_DANDISET}"
+               f"/versions/{_VERSION}/assets/?page_size=1000")
+        idx = {}
+        while url:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                d = json.load(r)
+            for a in d["results"]:
+                m = re.search(r"sub-([^/_]+)_ses-([0-9-]+)", a["path"])
+                if not m:
+                    continue
+                key = (m.group(1), m.group(2))
+                if a["path"].endswith("behavior+task.nwb"):
+                    idx.setdefault(key, {})["behav"] = a["asset_id"]
+                elif a["path"].endswith("spikesorting.nwb"):
+                    idx.setdefault(key, {})["spikes"] = a["asset_id"]
+            url = d.get("next")
+        _ASSETS = idx
+    return _ASSETS
+
+
+def _read(path, kind, session, subject):
+    """Read an NWB file from disk if present, else stream it from DANDI via lindi."""
+    if path.exists():
+        return pynwb.NWBHDF5IO(str(path), mode="r").read()
+    aid = _asset_index()[(subject, session)][kind]
+    url = f"https://api.dandiarchive.org/api/assets/{aid}/download/"
+    f = lindi.LindiH5pyFile.from_hdf5_file(url, local_cache=_local_cache)
+    return pynwb.NWBHDF5IO(file=f, mode="r").read()
+
+
+def _region_of(egroup, ml):
+    """DMFC = Neuropixel in right hemi (ml>0); FEF = V-probe in left hemi (ml<0); else other."""
+    npx = "Imec" in (egroup.device.manufacturer or "")
+    return "DMFC" if (npx and ml > 0) else "FEF" if (not npx and ml < 0) else "other"
+
+
+def load_single_object_trials(session=SESSION, subject=SUBJECT):
     """Return a DataFrame of clean single-object trials (index = NWB trial id)."""
-    nwb = pynwb.NWBHDF5IO(str(_behav(session)), mode="r").read()
+    nwb = _read(_behav(session, subject), "behav", session, subject)
     df = nwb.intervals["trials"].to_dataframe()
 
     ids = df["stimulus_object_identities"].map(ast.literal_eval)
@@ -58,17 +105,16 @@ def _probe_entry_coords(group):
     return v + [np.nan] * (3 - len(v))
 
 
-def load_units(session=SESSION):
+def load_units(session=SESSION, subject=SUBJECT):
     """Return (TsGroup of spike times, obs_trials DataFrame [unit x trial-id, bool])."""
-    nwb = pynwb.NWBHDF5IO(str(_spikes(session)), mode="r").read()
+    nwb = _read(_spikes(session, subject), "spikes", session, subject)
     u = nwb.processing["ecephys"]["units"]
     n = len(u.id)
 
     coords = {name: _probe_entry_coords(g) for name, g in nwb.electrode_groups.items()}
     group = np.asarray(u["electrodes_group"][:])
     ml, ap, si = np.array([coords[g] for g in group]).T
-    # s0 = Neuropixel in right hemisphere = DMFC; vprobe* = V-probe in left hemisphere = FEF.
-    region = np.where(group == "s0", "DMFC", "FEF")
+    region = np.array([_region_of(nwb.electrode_groups[g], m) for g, m in zip(group, ml)])
 
     units = nap.TsGroup({i: nap.Ts(np.asarray(u["spike_times"][i])) for i in range(n)})
     units.set_info(
