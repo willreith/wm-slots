@@ -1,30 +1,42 @@
 """Cross-temporal LDA decoding and cosine RSA on single-object trials (Stroud-style)."""
 import numpy as np
+import pandas as pd
+from joblib import Parallel, delayed, parallel_config
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import StratifiedKFold
 
-from extract import load_single_object_trials, load_units
+from extract import load_single_object_trials, load_units, _ROOT
 
-BINS = np.arange(0, 2.0001, 0.05)  # 20 x 100 ms, stim onset -> delay end
+BIN_SIZE = 0.05  # stim onset -> delay end, 2.0 s window
+T_END = 2.0
+
+
+def bin_edges(bin_size=BIN_SIZE):
+    return np.arange(0, T_END + bin_size / 2, bin_size)
+
+
+BINS = bin_edges()
 NBIN = len(BINS) - 1
 
 
-def rate_tensor(session, region, quality="good"):
+def rate_tensor(session, region, quality="good", subject="Perle", bin_size=BIN_SIZE):
     """Return (rates [unit x trial x bin] Hz, observed [unit x trial] bool, trials df)."""
-    trials = load_single_object_trials(session)
-    units, obs = load_units(session)
+    edges = bin_edges(bin_size)
+    nbin = len(edges) - 1
+    trials = load_single_object_trials(session, subject)
+    units, obs = load_units(session, subject)
     md = units.metadata
     keep = md["region"] == region
     if quality is not None:
         keep &= md["quality"] == quality
     uids = list(md.index[keep])
     obs_m = obs.loc[uids, trials.index].to_numpy()
-    rates = np.empty((len(uids), len(trials), NBIN))
+    rates = np.empty((len(uids), len(trials), nbin))
     t0s = trials["stim_time"].to_numpy()
     for i, uid in enumerate(uids):
         spk = units[uid].t
         for j, t0 in enumerate(t0s):
-            rates[i, j] = np.histogram(spk - t0, bins=BINS)[0] / 0.1
+            rates[i, j] = np.histogram(spk - t0, bins=edges)[0] / bin_size
     return rates, obs_m, trials
 
 
@@ -45,11 +57,11 @@ def _pseudo(rates, obs_m, tr_idx, y, classes, n_pseudo, rng):
     Each pseudo-trial draws, per unit, a whole real trial (all 20 bins) from that unit's
     observed trials of the class, so per-unit temporal trajectories stay coherent.
     """
-    nU = rates.shape[0]
+    nU, nbin = rates.shape[0], rates.shape[2]
     X, yy = [], []
     for c in classes:
         pool = tr_idx[y[tr_idx] == c]
-        block = np.zeros((n_pseudo, nU, NBIN))
+        block = np.zeros((n_pseudo, nU, nbin))
         for u in range(nU):
             avail = pool[obs_m[u, pool]]
             if len(avail) == 0:
@@ -68,28 +80,24 @@ def _zscore(Xtr, Xte):
     return (Xtr - mu) / sd, (Xte - mu) / sd
 
 
-def decode(session, region, factor, n_pseudo_train=60, n_pseudo_test=30,
-           n_repeats=20, n_folds=4, min_obs=4, seed=0, data=None):
-    """Cross-temporal LDA accuracy (train-bin x test-bin), averaged over folds and repeats."""
-    rates, obs_m, trials = data if data is not None else rate_tensor(session, region)
+def _prep(session, region, factor, min_obs, data, subject="Perle", bin_size=BIN_SIZE):
+    """Load/reuse the rate tensor, label trials, and drop units without enough obs per class."""
+    rates, obs_m, trials = (data if data is not None
+                            else rate_tensor(session, region, subject=subject, bin_size=bin_size))
     y = _labels(trials, factor)
     classes = np.unique(y)
     rates, obs_m, ok = _filter_units(rates, obs_m, y, classes, min_obs)
-    rng = np.random.default_rng(seed)
-    idx = np.arange(len(y))
-    acc = np.zeros((n_repeats, n_folds, NBIN, NBIN))
-    for r in range(n_repeats):
-        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed + r)
-        for f, (tr, te) in enumerate(skf.split(idx, y)):
-            Xtr, ytr = _pseudo(rates, obs_m, tr, y, classes, n_pseudo_train, rng)
-            Xte, yte = _pseudo(rates, obs_m, te, y, classes, n_pseudo_test, rng)
-            Xtr, Xte = _zscore(Xtr, Xte)
-            for i in range(NBIN):
-                clf = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
-                clf.fit(Xtr[:, :, i], ytr)
-                for j in range(NBIN):
-                    acc[r, f, i, j] = clf.score(Xte[:, :, j], yte)
-    return acc.mean((0, 1)), int(ok.sum())
+    return rates, obs_m, y, classes, ok
+
+
+def decode(session, region, factor, n_pseudo_train=60, n_pseudo_test=30,
+           n_repeats=20, n_folds=4, min_obs=4, seed=0, data=None,
+           subject="Perle", bin_size=BIN_SIZE, n_jobs=1):
+    """Cross-temporal LDA accuracy (train-bin x test-bin), averaged over folds and repeats."""
+    rates, obs_m, y, classes, ok = _prep(session, region, factor, min_obs, data, subject, bin_size)
+    m = _run_folds(rates, obs_m, y, classes, n_folds, n_repeats,
+                   n_pseudo_train, n_pseudo_test, "decode", seed, n_jobs)
+    return m, int(ok.sum())
 
 
 def _coding(X, y, classes):
@@ -105,21 +113,162 @@ def _xtemp_cos(A, B):
     return np.mean([An[k].T @ Bn[k] for k in range(A.shape[0])], axis=0)
 
 
-def rsa(session, region, factor, n_pseudo=60, n_repeats=20, n_folds=4, min_obs=4, seed=0, data=None):
-    """Cross-validated cross-temporal cosine similarity of class-coding vectors (bin x bin)."""
-    rates, obs_m, trials = data if data is not None else rate_tensor(session, region)
-    y = _labels(trials, factor)
-    classes = np.unique(y)
-    rates, obs_m, _ = _filter_units(rates, obs_m, y, classes, min_obs)
-    rng = np.random.default_rng(seed)
+def _fit_score(Xtr, ytr, Xte, yte, classes, kind):
+    """One fold's cross-temporal matrix (LDA accuracy for 'decode', cosine for 'rsa')."""
+    if kind == "decode":
+        nbin = Xtr.shape[2]
+        m = np.zeros((nbin, nbin))
+        for i in range(nbin):
+            clf = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
+            clf.fit(Xtr[:, :, i], ytr)
+            for j in range(nbin):
+                m[i, j] = clf.score(Xte[:, :, j], yte)
+        return m
+    return _xtemp_cos(_coding(Xtr, ytr, classes), _coding(Xte, yte, classes))
+
+
+def _one_fold(rates, obs_m, y, classes, tr, te, rng, n_tr, n_te, kind):
+    """Build train/test pseudopopulations for one fold and return its cross-temporal matrix."""
+    Xtr, ytr = _pseudo(rates, obs_m, tr, y, classes, n_tr, rng)
+    Xte, yte = _pseudo(rates, obs_m, te, y, classes, n_te, rng)
+    Xtr, Xte = _zscore(Xtr, Xte)
+    return _fit_score(Xtr, ytr, Xte, yte, classes, kind)
+
+
+def _splits(y, n_folds, n_repeats, seed):
+    """List of (r, f, train_idx, test_idx) over repeats x folds."""
     idx = np.arange(len(y))
-    sim = np.zeros((n_repeats, n_folds, NBIN, NBIN))
+    out = []
     for r in range(n_repeats):
         skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed + r)
         for f, (tr, te) in enumerate(skf.split(idx, y)):
-            Xtr, ytr = _pseudo(rates, obs_m, tr, y, classes, n_pseudo, rng)
-            Xte, yte = _pseudo(rates, obs_m, te, y, classes, n_pseudo, rng)
-            Xtr, Xte = _zscore(Xtr, Xte)
-            sim[r, f] = _xtemp_cos(_coding(Xtr, ytr, classes), _coding(Xte, yte, classes))
-    m = sim.mean((0, 1))
+            out.append((r, f, tr, te))
+    return out
+
+
+def _parallel(n_jobs):
+    """Sequential for n_jobs=1, else loky with one BLAS thread per worker (avoid oversubscription)."""
+    if n_jobs == 1:
+        return parallel_config(n_jobs=1)
+    return parallel_config(backend="loky", n_jobs=n_jobs, inner_max_num_threads=1)
+
+
+def _run_folds(rates, obs_m, y, classes, n_folds, n_repeats, n_tr, n_te, kind, seed, n_jobs):
+    """Run every (repeat, fold) in parallel; return the mean cross-temporal matrix."""
+    tasks = _splits(y, n_folds, n_repeats, seed)
+    with _parallel(n_jobs):
+        mats = Parallel()(
+            delayed(_one_fold)(rates, obs_m, y, classes, tr, te,
+                               np.random.default_rng(np.random.SeedSequence([seed, r, f])),
+                               n_tr, n_te, kind)
+            for (r, f, tr, te) in tasks)
+    return np.mean(mats, axis=0)
+
+
+def rsa(session, region, factor, n_pseudo=60, n_repeats=20, n_folds=4, min_obs=4, seed=0, data=None,
+        subject="Perle", bin_size=BIN_SIZE, n_jobs=1):
+    """Cross-validated cross-temporal cosine similarity of class-coding vectors (bin x bin)."""
+    rates, obs_m, y, classes, _ = _prep(session, region, factor, min_obs, data, subject, bin_size)
+    m = _run_folds(rates, obs_m, y, classes, n_folds, n_repeats,
+                   n_pseudo, n_pseudo, "rsa", seed, n_jobs)
     return (m + m.T) / 2
+
+
+# --- multi-session selection and aggregation ---
+
+def _counts():
+    return pd.read_csv(_ROOT / "session_counts.csv")
+
+
+def select_sessions(region, min_mua=0, min_good=0, min_trials=0, subject=None, three_position=None):
+    """Return [(subject, session), ...] meeting the criteria (region-scoped MUA/good counts)."""
+    df = _counts()
+    reg = region.lower()
+    mua = df[f"{reg}_units"] - df[f"{reg}_good"]
+    m = (mua >= min_mua) & (df[f"{reg}_good"] >= min_good) & (df["single_object_success"] >= min_trials)
+    subj = df["subject"].str.replace("sub-", "", regex=False)
+    if subject is not None:
+        m &= subj == subject
+    if three_position is not None:
+        m &= df["three_position"] == three_position
+    return list(zip(subj[m], df["session"][m]))
+
+
+def _check_position(sessions, factor):
+    if factor != "position":
+        return
+    df = _counts()
+    subj = df["subject"].str.replace("sub-", "", regex=False)
+    tp = {(s, ses): b for s, ses, b in zip(subj, df["session"], df["three_position"])}
+    bad = [(s, ses) for s, ses in sessions if not tp.get((s, ses), False)]
+    if bad:
+        raise ValueError(f"position decoding needs 3-position sessions; not 3-position: {bad}")
+
+
+def decode_group(sessions, region, factor, method="average", **kw):
+    """Aggregate cross-temporal decoding over sessions. method='average' | 'pool'."""
+    _check_position(sessions, factor)
+    if method == "average":
+        accs, per = [], []
+        for subj, sess in sessions:
+            acc, nU = decode(sess, region, factor, subject=subj, **kw)
+            accs.append(acc)
+            per.append((subj, sess, nU))
+        return dict(mean=np.mean(accs, 0), per_session=per, n_sessions=len(accs))
+    if method == "pool":
+        return _pool(sessions, region, factor, "decode", **kw)
+    raise ValueError(f"unknown method {method!r}")
+
+
+def rsa_group(sessions, region, factor, method="average", **kw):
+    """Aggregate cross-temporal RSA over sessions. method='average' | 'pool'."""
+    _check_position(sessions, factor)
+    if method == "average":
+        sims, per = [], []
+        for subj, sess in sessions:
+            sims.append(rsa(sess, region, factor, subject=subj, **kw))
+            per.append((subj, sess))
+        return dict(mean=np.mean(sims, 0), per_session=per, n_sessions=len(sims))
+    if method == "pool":
+        return _pool(sessions, region, factor, "rsa", **kw)
+    raise ValueError(f"unknown method {method!r}")
+
+
+def _one_fold_pool(preps, classes, fold_splits, rng, n_tr, n_te, kind):
+    """One fold of the pooled analysis: concatenate per-session pseudopopulations across units."""
+    Xtr_p, Xte_p, ytr, yte = [], [], None, None
+    for (rates, obs_m, y, _), (tr, te) in zip(preps, fold_splits):
+        Xtr_s, ytr = _pseudo(rates, obs_m, tr, y, classes, n_tr, rng)
+        Xte_s, yte = _pseudo(rates, obs_m, te, y, classes, n_te, rng)
+        Xtr_p.append(Xtr_s)
+        Xte_p.append(Xte_s)
+    Xtr, Xte = np.concatenate(Xtr_p, axis=1), np.concatenate(Xte_p, axis=1)
+    Xtr, Xte = _zscore(Xtr, Xte)
+    return _fit_score(Xtr, ytr, Xte, yte, classes, kind)
+
+
+def _pool(sessions, region, factor, kind, n_pseudo_train=60, n_pseudo_test=30, n_pseudo=60,
+          n_repeats=20, n_folds=4, min_obs=4, seed=0, bin_size=BIN_SIZE, n_jobs=1):
+    """One cross-session pseudopopulation (units concatenated) for decode or rsa."""
+    n_tr = n_pseudo_train if kind == "decode" else n_pseudo
+    n_te = n_pseudo_test if kind == "decode" else n_pseudo
+    preps = [_prep(sess, region, factor, min_obs, None, subj, bin_size)[:4]
+             for subj, sess in sessions]
+    classes = preps[0][3]
+    nU = sum(p[0].shape[0] for p in preps)
+    tasks = []
+    for r in range(n_repeats):
+        per_sess = [list(StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed + r)
+                         .split(np.arange(len(y)), y)) for (_, _, y, _) in preps]
+        for f in range(n_folds):
+            tasks.append((r, f, [per_sess[si][f] for si in range(len(preps))]))
+    with _parallel(n_jobs):
+        mats = Parallel()(
+            delayed(_one_fold_pool)(preps, classes, fs,
+                                    np.random.default_rng(np.random.SeedSequence([seed, r, f])),
+                                    n_tr, n_te, kind)
+            for (r, f, fs) in tasks)
+    m = np.mean(mats, axis=0)
+    if kind == "rsa":
+        m = (m + m.T) / 2
+    return dict(mean=m, nU=nU, n_sessions=len(sessions))
