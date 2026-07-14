@@ -8,3 +8,4 @@ data/
 *.python-version
 docs/ANALYSIS_FRAMEWORK.md
 docs/analysis_todo.md
+private/
