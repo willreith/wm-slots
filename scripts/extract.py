@@ -9,13 +9,20 @@ import pynwb
 import pynapple as nap
 
 _ROOT = Path(__file__).resolve().parents[1]
-BEHAV = _ROOT / "data/Perle/behav/sub-Perle_ses-2022-05-28_behavior+task.nwb"
-SPIKES = _ROOT / "data/Perle/ephys/spikes/sub-Perle_ses-2022-05-28_spikesorting.nwb"
+SESSION = "2022-05-28"
 
 
-def load_single_object_trials(path=BEHAV):
+def _behav(session=SESSION):
+    return _ROOT / f"data/Perle/behav/sub-Perle_ses-{session}_behavior+task.nwb"
+
+
+def _spikes(session=SESSION):
+    return _ROOT / f"data/Perle/ephys/spikes/sub-Perle_ses-{session}_spikesorting.nwb"
+
+
+def load_single_object_trials(session=SESSION):
     """Return a DataFrame of clean single-object trials (index = NWB trial id)."""
-    nwb = pynwb.NWBHDF5IO(str(path), mode="r").read()
+    nwb = pynwb.NWBHDF5IO(str(_behav(session)), mode="r").read()
     df = nwb.intervals["trials"].to_dataframe()
 
     ids = df["stimulus_object_identities"].map(ast.literal_eval)
@@ -51,21 +58,24 @@ def _probe_entry_coords(group):
     return v + [np.nan] * (3 - len(v))
 
 
-def load_units(path=SPIKES):
+def load_units(session=SESSION):
     """Return (TsGroup of spike times, obs_trials DataFrame [unit x trial-id, bool])."""
-    nwb = pynwb.NWBHDF5IO(str(path), mode="r").read()
+    nwb = pynwb.NWBHDF5IO(str(_spikes(session)), mode="r").read()
     u = nwb.processing["ecephys"]["units"]
     n = len(u.id)
 
     coords = {name: _probe_entry_coords(g) for name, g in nwb.electrode_groups.items()}
     group = np.asarray(u["electrodes_group"][:])
     ml, ap, si = np.array([coords[g] for g in group]).T
+    # s0 = Neuropixel in right hemisphere = DMFC; vprobe* = V-probe in left hemisphere = FEF.
+    region = np.where(group == "s0", "DMFC", "FEF")
 
     units = nap.TsGroup({i: nap.Ts(np.asarray(u["spike_times"][i])) for i in range(n)})
     units.set_info(
         quality=np.asarray(u["quality"][:]),
         depth=np.asarray(u["depth"][:]),
         group=group,
+        region=region,
         ml=ml, ap=ap, si=si,
     )
     obs = pd.DataFrame(
