@@ -16,4 +16,10 @@ singular vectors of length N. We will then project the single-trial timeseries d
 (by position or identity) onto these subspace.
 
 2. Confusion matrices for decoding on single-object error trials.
+
+So far, we have only looked at decoding the position on correct trials. We would like to apply
+this decoder on incorrect trials in order to figure out if the wrong position being encoded
+in DMFC or FEF is what is leading to these errors.
+
+
 3. PCA on single-object correct vs error trials.
