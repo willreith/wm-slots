@@ -8,6 +8,10 @@ We propose to reanalyse the Watters et al. (2025) dataset to test whether PFC WM
 ## Data
 https://doi.org/10.48324/dandi.000620/0.260127.2208
 
+For DMFC, use the 2022-06-01 dataset; for FEF, use the 2022-06-04 dataset.
+
+DMFC is recorded in right hemisphere using Neuropixels 1.0 probes; FEF is recorded in left hemisphere using V-probes.
+
 ## Background reading
 Dorrell, W., Latham, P. E., Behrens, T. E. J., & Whittington, J. C. R. (2026). An Efficient Computing Theory of Prefrontal Structured Working Memory Representations (p. 2026.02.16.706126). bioRxiv. https://doi.org/10.64898/2026.02.16.706126
 Jensen, K. T., Doohan, P., Sablé-Meyer, M., Reinert, S., Baram, A., Akam, T., & Behrens, T. E. J. (2025). A mechanistic theory of planning in prefrontal cortex (p. 2025.09.23.677709). bioRxiv. https://doi.org/10.1101/2025.09.23.677709
