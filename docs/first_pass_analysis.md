@@ -1,25 +1,5 @@
 # Description of first pass analysis
 
-## Project description
-Gain model or dynamic slots? Reanalysing prefrontal working memory represent- ations with rotational dynamics
-Working memory (WM) allows animals to store recent information for imminent use, yet the nature of WM representations in prefrontal cortex (PFC) remains debated. Watters et al. (2025, bioRxiv) presented rhesus macaques with multiple simultaneous objects, one of which subsequently determined a rewarded saccade. They compared several models of WM representations and found that PFC activity is consistent with a gain model: objects represented by weighted activity in a shared neural pool. This contrasts with a slot model, in which objects are represented in separate subspaces - an architecture that explains WM representations in sequence-WM tasks (Xie et al., 2022, Science; El-Gaby et al., 2024, Nature; Jensen et al., 2025, bioRxiv). The discrepancy in explanatory power across disparate WM tasks may reflect differing task demands, but another possibility is that Watters et al. only tested a limited version of the slot model. Stroud et al. (2023) showed that non-sequence WM representations rotate through a series of subspaces during delay periods and recent theoretical work suggests that such rotational dynamics are both energetically and computationally efficient (Dorrell et al., 2026, bioRxiv).
-We propose to reanalyse the Watters et al. (2025) dataset to test whether PFC WM representations are better described by a gain model or a dynamic slot model incorporating rotational dynamics, a comparison their original analyses did not make.
-
-## Data
-https://doi.org/10.48324/dandi.000620/0.260127.2208
-
-For DMFC, use the 2022-06-01 dataset; for FEF, use the 2022-06-04 dataset.
-
-DMFC is recorded in right hemisphere using Neuropixels 1.0 probes; FEF is recorded in left hemisphere using V-probes.
-
-## Background reading
-Dorrell, W., Latham, P. E., Behrens, T. E. J., & Whittington, J. C. R. (2026). An Efficient Computing Theory of Prefrontal Structured Working Memory Representations (p. 2026.02.16.706126). bioRxiv. https://doi.org/10.64898/2026.02.16.706126
-Jensen, K. T., Doohan, P., Sablé-Meyer, M., Reinert, S., Baram, A., Akam, T., & Behrens, T. E. J. (2025). A mechanistic theory of planning in prefrontal cortex (p. 2025.09.23.677709). bioRxiv. https://doi.org/10.1101/2025.09.23.677709
-Johnston, W. J., Fine, J. M., Yoo, S. B. M., Ebitz, R. B., & Hayden, B. Y. (2024). Semi-orthogonal subspaces for value mediate a binding and generalization trade-off. Nature Neuroscience, 1–13. https://doi.org/10.1038/s41593-024-01758-5
-Stroud, J. P., Watanabe, K., Suzuki, T., Stokes, M. G., & Lengyel, M. (2023). Optimal information loading into working memory explains dynamic coding in the prefrontal cortex. Proceedings of the National Academy of Sciences, 120(48), e2307991120. (world). https://doi.org/10.1073/pnas.2307991120
-Watters, N., Gabel, J., Tenenbaum, J., & Jazayeri, M. (2026). Working Memory of Multi-Object Scenes in Primate Frontal Cortex (p. 2026.01.27.702062). bioRxiv. https://doi.org/10.64898/2026.01.27.702062
-Xie, Y., Hu, P., Li, J., Chen, J., Song, W., Wang, X.-J., Yang, T., Dehaene, S., Tang, S., Min, B., & Wang, L. (2022). Geometry of sequence working memory in macaque prefrontal cortex. Science, 375(6581), 632–639. https://doi.org/10.1126/science.abm0204
-
 ## Goal
 Carry out preliminary analysis to understand whether this is a worthwhile project to continue with.
 
@@ -29,4 +9,79 @@ We want to replicate the working memory signatures from Stroud et al. (2023) to 
 To do so, we will take trials in which only one object is shown to the animal. On these trials, we will either marginalise over the position or the object identity. We will then try to decode, respectively, the object identity or the position using linear discriminant analysis. The decoder will be trained on 100ms bins from the stimulus presentation (1000ms) until the end of the delay period (1000ms). Each decoder will be trained on 75% of trials and will be used to decode identity or position from held-out data (25%) from all time points with 4-fold cross-validation. 
 
 In addition to doing this decoding analysis, we will also do representational similarity analysis (using cosine similarity) with the same binning and train/test strategy as for the decoding analysis.
+
+## Methods detail
+
+### Trials, marginalisation, and binning
+We use only single-object trials, where one object of identity {a, b, c} appears at one of three
+screen positions {0, 1, 2} (3×3 design). To decode **identity** we marginalise over position (pool
+all positions and ask which object was shown); to decode **position** we marginalise over identity.
+Each is therefore a 3-class problem, which pools trials across the other factor and so has more
+trials per class (more power) than a joint 9-way identity×position decode.
+
+Spikes are aligned to stimulus onset and binned into a rate tensor spanning the 2.0 s analysis
+window (1.0 s stimulus + 1.0 s delay). The default bin is 50 ms (40 bins), giving a 40×40
+cross-temporal matrix; the bin size is configurable (e.g. 100 ms → 20 bins).
+
+### Why a pseudopopulation
+Units are not simultaneously recorded across sessions, and even within a session not every unit is
+observed on every trial: each unit carries a per-trial **observation mask**, and a zero spike count
+in an *unobserved* trial is missing data, not silence (median coverage ≈0.67; only ~30% of units are
+observed on all trials). A real population vector for a given trial therefore does not exist for most
+units. A *pseudopopulation* sidesteps this: because we only need each class's *distribution* of
+population responses (not the true simultaneous activity), we synthesise population vectors by
+drawing, independently per unit, from that unit's own trials of the required class.
+
+Construction (per cross-validation fold, per class): for each unit, sample with replacement a whole
+real trial of that class from the unit's *observed* trials, and copy that trial's entire 20/40-bin
+firing-rate trajectory into the pseudo-trial. Sampling a whole trial (rather than per-bin) keeps each
+unit's temporal trajectory internally coherent, which is essential for the cross-temporal analysis.
+Units unobserved for a class in that fold contribute zeros. Stacking many such pseudo-trials gives a
+(pseudo-trials × units × bins) tensor with balanced classes. Units are z-scored per unit using the
+training set's mean/SD so that no unit dominates on firing-rate scale alone.
+
+### Linear discriminant analysis (LDA) and cross-temporal generalisation
+LDA finds the linear projection of the population vector that best separates the class means relative
+to within-class scatter; a test vector is assigned to the nearest class in that discriminant space.
+We use **shrinkage LDA** (Ledoit–Wolf, `solver='lsqr', shrinkage='auto'`), which regularises the
+covariance estimate — necessary because we have many units relative to trials.
+
+The key manipulation is **cross-temporal**: we train one LDA on each *training* time bin and then
+test it at *every* time bin, filling a (train-bin × test-bin) accuracy matrix (chance = 1/3). The
+off-diagonal structure is the scientific readout:
+
+- A **stable / gain code** uses a fixed coding axis over time, so a decoder trained early generalises
+  to late bins → the matrix is a filled square (high off-diagonal).
+- A **rotating / dynamic-slot code** moves the coding subspace through the delay, so a decoder trained
+  early fails on late bins → accuracy concentrates in a band along the diagonal (off-diagonal
+  collapse). This is the Stroud et al. (2023) dynamic-coding signature.
+
+Training uses 75% of trials, testing the held-out 25%, with 4-fold cross-validation; the whole
+procedure is repeated over many random pseudopopulation draws and averaged.
+
+### Representational similarity analysis (RSA)
+As a decoder-free complement we compute, for each time bin, a **class-coding vector** per class (the
+class-mean population vector minus the grand mean over classes) and take the **cosine similarity**
+between coding vectors at every pair of time bins (mean over classes). To avoid a spurious diagonal
+of 1.0 from correlated noise, the two bins in each comparison come from independent
+cross-validation folds. High off-diagonal cosine = the coding geometry is preserved across time
+(stable); off-diagonal decay = the coding subspace rotates (dynamic). Same binning and train/test
+strategy as the decoder.
+
+### Aggregating over sessions
+Sessions can be selected by criteria — minimum MUA units and good units *per region*, minimum
+successful one-object trials, subject, and 3-position vs >3-position design — and the cross-temporal
+matrices aggregated two ways:
+
+- **average** (default): run the full decode/RSA within each session (its own pseudopopulation) and
+  mean the resulting matrices, treating each session as an independent replicate (supports mean ± SEM
+  across sessions).
+- **pool**: concatenate units across sessions into a single large pseudopopulation and decode once,
+  for maximum power. This assumes the three positions (and three identities) are physically
+  comparable across sessions, which holds for the fixed 3-position design; pseudo-trials are paired
+  randomly across sessions within each class.
+
+Position decoding is restricted to the discrete **3-position** sessions (Perle 2022-05-26…06-05,
+Elgar 2022-08-19…09-05); later sessions use ~continuous positions and are out of scope for position.
+Sessions are loaded from disk when available, otherwise streamed from the DANDI archive.
 
