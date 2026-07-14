@@ -18,6 +18,14 @@ def bin_edges(bin_size=BIN_SIZE):
 BINS = bin_edges()
 NBIN = len(BINS) - 1
 
+WINDOWS = [(0.2, 0.5), (0.7, 1.0), (1.0, 1.3), (1.35, 1.65), (1.7, 2.0)]  # s from stim onset
+
+
+def _window_slices(bin_size=BIN_SIZE):
+    edges = bin_edges(bin_size)
+    centers = (edges[:-1] + edges[1:]) / 2
+    return [np.where((centers >= a) & (centers < b))[0] for a, b in WINDOWS]
+
 
 def rate_tensor(session, region, quality="good", subject="Perle", bin_size=BIN_SIZE):
     """Return (rates [unit x trial x bin] Hz, observed [unit x trial] bool, trials df)."""
@@ -172,6 +180,46 @@ def rsa(session, region, factor, n_pseudo=60, n_repeats=20, n_folds=4, min_obs=4
     m = _run_folds(rates, obs_m, y, classes, n_folds, n_repeats,
                    n_pseudo, n_pseudo, "rsa", seed, n_jobs)
     return (m + m.T) / 2
+
+
+def _principal_angles(Ba, Bb):
+    """Mean principal angle (deg) between two orthonormal-row bases (2, nU)."""
+    s = np.linalg.svd(Ba @ Bb.T, compute_uv=False)
+    return np.degrees(np.arccos(np.clip(s, -1, 1)).mean())
+
+
+def subspace_trajectories(session, region, factor, n_pseudo_train=60, n_pseudo_test=30,
+                          n_repeats=20, n_folds=4, min_obs=4, seed=0, data=None,
+                          subject="Perle", bin_size=BIN_SIZE):
+    """Per-window LDA coding subspaces (Xie Fig3D) and cross-validated projected trajectories.
+
+    Fit shrinkage LDA on the window-averaged pseudopopulation for each WINDOW; the top-2 right
+    singular vectors of the (nClass x nUnit) coef, accumulated over folds, give an orthonormal 2D
+    coding plane per window. Project the held-out class-mean trajectories onto each plane.
+    """
+    rates, obs_m, y, classes, ok = _prep(session, region, factor, min_obs, data, subject, bin_size)
+    wins = _window_slices(bin_size)
+    nU, nbin = rates.shape[0], rates.shape[2]
+    coef_sum = [np.zeros((len(classes), nU)) for _ in wins]
+    traj_sum = np.zeros((len(classes), nU, nbin))
+    tasks = _splits(y, n_folds, n_repeats, seed)
+    for (r, f, tr, te) in tasks:
+        rng = np.random.default_rng(np.random.SeedSequence([seed, r, f]))
+        Xtr, ytr = _pseudo(rates, obs_m, tr, y, classes, n_pseudo_train, rng)
+        Xte, yte = _pseudo(rates, obs_m, te, y, classes, n_pseudo_test, rng)
+        Xtr, Xte = _zscore(Xtr, Xte)
+        for w, sl in enumerate(wins):
+            clf = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
+            clf.fit(Xtr[:, :, sl].mean(2), ytr)
+            coef_sum[w] += clf.coef_
+        traj_sum += np.stack([Xte[yte == c].mean(0) for c in classes])
+    n = len(tasks)
+    bases = [np.linalg.svd(cs / n, full_matrices=False)[2][:2] for cs in coef_sum]
+    traj = traj_sum / n
+    proj = {w: np.stack([bases[w] @ traj[c] for c in range(len(classes))]) for w in range(len(wins))}
+    angles = np.array([[_principal_angles(bases[i], bases[j]) for j in range(len(wins))]
+                       for i in range(len(wins))])
+    return dict(traj=proj, angles=angles, bases=bases, classes=classes, nU=int(ok.sum()))
 
 
 # --- multi-session selection and aggregation ---
