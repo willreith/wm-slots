@@ -7,3 +7,4 @@ data/
 *__pycache__/
 *.python-version
 docs/ANALYSIS_FRAMEWORK.md
+docs/analysis_todo.md
