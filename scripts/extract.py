@@ -81,12 +81,20 @@ def load_single_object_trials(session=SESSION, subject=SUBJECT):
     uniq = np.unique(xy.round(3), axis=0)
     pos_id = [int(np.argmin(np.abs(uniq - r).sum(axis=1))) for r in xy.round(3)]
 
+    # Saccade endpoint (post-hoc, high-res) and its nearest canonical position.
+    resp = np.array([np.asarray(r, dtype=float) for r in df.loc[keep, "response_position"]])
+    chosen = [int(np.argmin(np.abs(uniq - r).sum(axis=1))) for r in resp.round(3)]
+
     out = pd.DataFrame(
         {
             "identity": [i[0] for i in ids[keep]],
             "position": pos_id,
             "x": xy[:, 0],
             "y": xy[:, 1],
+            "correct": df.loc[keep, "reward_duration"].to_numpy() > 0,
+            "chosen": chosen,
+            "resp_x": resp[:, 0],
+            "resp_y": resp[:, 1],
             "stim_time": df.loc[keep, "phase_stimulus_time"].to_numpy(),
             "delay_time": df.loc[keep, "phase_delay_time"].to_numpy(),
             "cue_time": df.loc[keep, "phase_cue_time"].to_numpy(),
